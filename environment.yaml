@@ -1,4 +1,4 @@
-name: molmo
+name: molmo-train
 channels:
   - defaults
 dependencies:

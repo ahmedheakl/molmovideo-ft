@@ -11,6 +11,9 @@ from decord import VideoReader, cpu
 
 from .params import DataArguments
 from .constants import *
+from .utils import SYSTEM_PROMPT, PROMPT_TEMPLATES, get_coords, compute_mse_points, plot_metric, extract_caption, get_points_in_xml_format
+from glob import glob
+import random 
 
 def encode_video(video_path, max_num_frames=10):
     def uniform_sample(l, n):
@@ -26,6 +29,19 @@ def encode_video(video_path, max_num_frames=10):
     frames = vr.get_batch(frame_idx).asnumpy()
     frames = [Image.fromarray(v.astype('uint8')) for v in frames]
     return frames
+
+
+def sample_frames(video_path, frame_indices, max_num_frames=2):
+    selected_indices = sorted(random.sample(range(len(frame_indices)), min(max_num_frames, len(frame_indices))))
+    selected_frame_idxs = [frame_indices[i] for i in selected_indices]
+    images = [f"{video_path}/{frame_indices[i]:05d}.jpg" for i in selected_indices]
+    images = [Image.open(v).convert("RGB") for v in images]
+    if len(images) < max_num_frames:
+        black_image = Image.new('RGB', images[0].size, (0, 0, 0))
+        images = [black_image] * (max_num_frames - len(images)) + images
+        selected_frame_idxs = [0] * (max_num_frames - len(images)) + selected_frame_idxs
+    return images, selected_frame_idxs
+
 
 def pad_sequence(sequences, padding_side='right', padding_value=0):
     """
@@ -57,10 +73,22 @@ class SupervisedDataset(Dataset):
         padding=True,
     ):
         super(SupervisedDataset, self).__init__()
-        if isinstance(data_path, str):
+        extention = os.path.splitext(data_path)[-1] 
+        if isinstance(data_path, str) and extention == '.json':
             list_data_dict = json.load(open(data_path, "r"))
+        elif isinstance(data_path, str) and extention == '.jsonl':
+            list_data_dict = []
+            with open(data_path, "r") as f:
+                for line in f:
+                    list_data_dict.append(json.loads(line))
         else:
-            list_data_dict = data_path
+            # it is a folder with .jsonl inside of it
+            list_data_dict = []
+            for file in os.listdir(data_path):
+                if file.endswith('.jsonl'):
+                    with open(os.path.join(data_path, file), "r") as f:
+                        for line in f:
+                            list_data_dict.append(json.loads(line))
 
         self.processor = processor
         self.list_data_dict = list_data_dict
@@ -68,6 +96,7 @@ class SupervisedDataset(Dataset):
         self.padding = padding
         self.fps = data_args.fps
         self.eos_token_id = processor.tokenizer.eos_token_id
+        self.max_num_frames = 2
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -101,8 +130,21 @@ class SupervisedDataset(Dataset):
             if not os.path.exists(video_file):
                 video_file = os.path.join(video_folder, video_file)
 
-            images = encode_video(video_file, self.max_num_frames)
-            
+            images, selected_frame_idxs = sample_frames(video_file, sources['frame_idxs'], self.max_num_frames)
+            caption = sources['caption']
+            question = SYSTEM_PROMPT.format(num_frames=self.max_num_frames, selected_frame_idxs=selected_frame_idxs) + ' ' + random.choice(PROMPT_TEMPLATES).format(label=caption)
+            selected_points = {i: sources['points'][i] for i in selected_frame_idxs[-1:]}
+            answer = get_points_in_xml_format(selected_points, caption)
+            sources['conversations'] = [
+                {
+                    "from": "human",
+                    "value": f"{LLAVA_VIDEO_TOKEN}\n{question}"
+                },
+                {
+                    "from": "gpt",
+                    "value": answer
+                }
+            ]
             is_video = True
             num_frames = len(images)
 
