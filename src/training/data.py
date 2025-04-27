@@ -15,24 +15,23 @@ from .utils import SYSTEM_PROMPT, PROMPT_TEMPLATES, get_coords, compute_mse_poin
 from glob import glob
 import random 
 
-def encode_video(video_path, max_num_frames=10):
-    def uniform_sample(l, n):
-        gap = len(l) / n
-        idxs = [int(i * gap + gap / 2) for i in range(n)]
-        return [l[i] for i in idxs]
 
-    vr = VideoReader(video_path, ctx=cpu(0))
-    sample_fps = round(vr.get_avg_fps() / 1)  # FPS
-    frame_idx = [i for i in range(0, len(vr), sample_fps)]
-    if len(frame_idx) > max_num_frames:
-        frame_idx = uniform_sample(frame_idx, max_num_frames)
-    frames = vr.get_batch(frame_idx).asnumpy()
-    frames = [Image.fromarray(v.astype('uint8')) for v in frames]
-    return frames
-
+MAX_PATCHES = 26
+MAX_INPUT_IDS = 3000
 
 def sample_frames(video_path, frame_indices, max_num_frames=2):
-    selected_indices = sorted(random.sample(range(len(frame_indices)), min(max_num_frames, len(frame_indices))))
+    start_index = random.sample(range(len(frame_indices)), 1)[0]
+    ok = False
+    while not ok:
+        image_path = os.path.join(video_path, f"{frame_indices[start_index]:05d}.jpg")
+        if os.path.exists(image_path):
+            ok = True
+        start_index = random.sample(range(len(frame_indices)), 1)[0]
+    selected_indices = []
+    for i in range(max_num_frames):
+        if start_index - i >= 0:
+            selected_indices.append(start_index - i)
+    selected_indices = selected_indices[::-1]
     selected_frame_idxs = [frame_indices[i] for i in selected_indices]
     images = [f"{video_path}/{frame_indices[i]:05d}.jpg" for i in selected_indices]
     images = [Image.open(v).convert("RGB") for v in images]
@@ -168,6 +167,31 @@ class SupervisedDataset(Dataset):
             if idx == 0:
                 user_prompt = user_input['content']
                 inputs = processor.process(text=user_prompt, images=images)
+                inputs['input_ids'] = torch.cat(
+                    [inputs['input_ids'], torch.full((MAX_INPUT_IDS - inputs['input_ids'].shape[0],), self.processor.tokenizer.pad_token_id)],
+                    dim=0
+                )
+
+                # pad images (only 3 dims)
+                inputs['images'] = torch.cat(
+                    [inputs['images'], torch.full((MAX_PATCHES - inputs['images'].shape[0], inputs['images'].shape[1], inputs['images'].shape[2]), 0)],
+                    dim=0
+                )
+
+                # pad image_input_idx
+                pad_image_input_idx = torch.full(
+                    (MAX_PATCHES - inputs['image_input_idx'].shape[0], inputs['image_input_idx'].shape[1]),
+                    0
+                )
+                inputs['image_input_idx'] = torch.cat([inputs['image_input_idx'], pad_image_input_idx], dim=0)
+
+                # pad image_masks
+                pad_image_masks = torch.full(
+                    (MAX_PATCHES - inputs['image_masks'].shape[0], inputs['image_masks'].shape[1]),
+                    -1
+                )
+                inputs['image_masks'] = torch.cat([inputs['image_masks'], pad_image_masks], dim=0)
+
                 prompt_input_ids = inputs['input_ids'].unsqueeze(0)
                 all_images.append(inputs['images'].unsqueeze(0))
                 all_image_input_idx.append(inputs['image_input_idx'].unsqueeze(0))
